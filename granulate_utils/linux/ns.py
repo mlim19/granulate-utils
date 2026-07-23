@@ -231,6 +231,7 @@ def run_in_ns(
     nstypes: List[str],
     callback: Callable[[], T],
     target_pid: int = 1,
+    timeout: Optional[float] = 10.0,
 ) -> T:
     """
     Runs a callback in a new thread, switching to a set of the namespaces of a target process before
@@ -243,7 +244,16 @@ def run_in_ns(
     for the core threads.
 
     By default, run stuff in init NS. You can pass 'target_pid' to run in the namespace of that process.
+
+    Args:
+        nstypes: List of namespace types to enter (e.g., ["pid", "mnt"])
+        callback: Function to execute in the target namespace
+        target_pid: PID of the process whose namespaces to enter (default: 1)
+        timeout: Maximum time to wait for the thread to complete (default: 10 seconds).
+                 Set to None for no timeout (not recommended).
     """
+    import sys
+    print(f"[DEBUG run_in_ns] START nstypes={nstypes} target_pid={target_pid} timeout={timeout}", file=sys.stderr, flush=True)
 
     for ns in nstypes:
         assert_ns_str(ns)
@@ -253,24 +263,41 @@ def run_in_ns(
 
     def _switch_and_run():
         try:
+            print(f"[DEBUG run_in_ns] Thread: entering namespace", file=sys.stderr, flush=True)
             enter_process_ns(nstypes, target_pid)
+            print(f"[DEBUG run_in_ns] Thread: namespace entered, calling callback", file=sys.stderr, flush=True)
 
             nonlocal ret
             ret = callback()
+            print(f"[DEBUG run_in_ns] Thread: callback completed", file=sys.stderr, flush=True)
         except BaseException as e:
+            print(f"[DEBUG run_in_ns] Thread: exception {type(e).__name__}: {e}", file=sys.stderr, flush=True)
             # save the exception so we can re-raise it in the calling thread
             nonlocal exc
             exc = e
 
     t = Thread(target=_switch_and_run)
+    print(f"[DEBUG run_in_ns] Starting thread", file=sys.stderr, flush=True)
     t.start()
-    t.join()
+    print(f"[DEBUG run_in_ns] Joining thread with timeout={timeout}", file=sys.stderr, flush=True)
+    t.join(timeout=timeout)
+    print(f"[DEBUG run_in_ns] Join returned, is_alive={t.is_alive()}", file=sys.stderr, flush=True)
+
+    if t.is_alive():
+        # Thread is still running after timeout - likely deadlocked
+        print(f"[DEBUG run_in_ns] TIMEOUT - thread still alive!", file=sys.stderr, flush=True)
+        raise TimeoutError(
+            f"run_in_ns timed out after {timeout}s waiting for namespace callback. "
+            f"nstypes={nstypes}, target_pid={target_pid}"
+        )
 
     if isinstance(ret, _Sentinel):
         assert exc is not None
+        print(f"[DEBUG run_in_ns] Re-raising exception from thread", file=sys.stderr, flush=True)
         raise exc
     else:
         assert exc is None
+        print(f"[DEBUG run_in_ns] SUCCESS", file=sys.stderr, flush=True)
         return ret
 
 
@@ -283,9 +310,12 @@ def run_in_ns_wrapper(
     nstypes: List[str],
     callback: Callable[[], T],
     target_pid: int = 1,
+    timeout: Optional[float] = 10.0,
 ) -> T:
+    import sys
+    print(f"[DEBUG run_in_ns_wrapper] is_root={is_root()} nstypes={nstypes} target_pid={target_pid}", file=sys.stderr, flush=True)
     if is_root():
-        return run_in_ns(nstypes, callback, target_pid)
+        return run_in_ns(nstypes, callback, target_pid, timeout)
     return callback()
 
 
